@@ -3,19 +3,18 @@ import json
 import hashlib
 import shutil
 from pathlib import Path
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 import getpass
+import time
 
-# ============================================
-# Configuration
-# ============================================
 QUARANTINE_FOLDER = "quarantine"
 BAD_HASHES_FILE = "bad_hashes.json"
-
 SCAN_EXTENSIONS = [".exe", ".dll", ".txt", ".json", ".bat", ".cmd"]
 
-# ============================================
+# ------------------------------
 # Load known malicious hashes
-# ============================================
+# ------------------------------
 if os.path.exists(BAD_HASHES_FILE):
     with open(BAD_HASHES_FILE, "r") as f:
         BAD_HASHES = json.load(f).get("sha256", [])
@@ -23,9 +22,9 @@ else:
     BAD_HASHES = []
 
 
-# ============================================
-# SHA256 file hashing
-# ============================================
+# ------------------------------
+# Hashing
+# ------------------------------
 def sha256_file(path: Path) -> str:
     sha = hashlib.sha256()
     try:
@@ -37,9 +36,9 @@ def sha256_file(path: Path) -> str:
     return sha.hexdigest()
 
 
-# ============================================
-# Suspicious pattern detection inside text files
-# ============================================
+# ------------------------------
+# Pattern detection
+# ------------------------------
 def contains_suspicious_patterns(path: Path) -> bool:
     if path.suffix not in [".txt", ".json", ".bat", ".cmd"]:
         return False
@@ -61,16 +60,12 @@ def contains_suspicious_patterns(path: Path) -> bool:
         "base64"
     ]
 
-    for p in patterns:
-        if p in content.lower():
-            return True
-
-    return False
+    return any(p in content.lower() for p in patterns)
 
 
-# ============================================
-# Heuristic detection (abnormal behavior)
-# ============================================
+# ------------------------------
+# Heuristics
+# ------------------------------
 def heuristic_score(path: Path) -> int:
     score = 0
     size = path.stat().st_size
@@ -90,9 +85,9 @@ def heuristic_score(path: Path) -> int:
     return score
 
 
-# ============================================
-# Move suspicious file to quarantine
-# ============================================
+# ------------------------------
+# Quarantine
+# ------------------------------
 def move_to_quarantine(path: Path):
     os.makedirs(QUARANTINE_FOLDER, exist_ok=True)
     target = Path(QUARANTINE_FOLDER) / path.name
@@ -103,87 +98,79 @@ def move_to_quarantine(path: Path):
         counter += 1
 
     shutil.move(str(path), str(target))
-    print(f"🚨 [QUARANTINE] {path.name} → {target}")
 
 
-# ============================================
-# Folder scanning logic
-# ============================================
-def scan_folder(folder: Path):
-    if not folder.exists():
+# ------------------------------
+# Analyze incoming file
+# ------------------------------
+def analyze_file(path: Path):
+    if not path.exists():
         return
 
-    print(f"\n🔍 Scanning: {folder}")
+    if path.suffix.lower() not in SCAN_EXTENSIONS:
+        return
 
-    for file in folder.rglob("*"):
-        if not file.is_file():
-            continue
+    file_hash = sha256_file(path)
+    if file_hash in BAD_HASHES:
+        move_to_quarantine(path)
+        return
 
-        if file.suffix.lower() not in SCAN_EXTENSIONS:
-            continue
+    if contains_suspicious_patterns(path):
+        move_to_quarantine(path)
+        return
 
-        print(f"→ Checking: {file.name}")
-
-        file_hash = sha256_file(file)
-        if file_hash in BAD_HASHES:
-            print("❗ BAD HASH MATCH — known malicious!")
-            move_to_quarantine(file)
-            continue
-
-        if contains_suspicious_patterns(file):
-            print("⚠ Suspicious patterns detected!")
-            move_to_quarantine(file)
-            continue
-
-        score = heuristic_score(file)
-        if score >= 2:
-            print(f"⚠ Heuristic Score {score} — abnormal file!")
-            move_to_quarantine(file)
-            continue
-
-        print("✔ Clean")
+    score = heuristic_score(path)
+    if score >= 2:
+        move_to_quarantine(path)
 
 
-# ============================================
-# Auto-scan common malware locations
-# ============================================
-def auto_scan_common_locations():
+# ------------------------------
+# Real-time event handler
+# ------------------------------
+class WatchDogHandler(FileSystemEventHandler):
+    def on_created(self, event):
+        if not event.is_directory:
+            analyze_file(Path(event.src_path))
+
+    def on_modified(self, event):
+        if not event.is_directory:
+            analyze_file(Path(event.src_path))
+
+
+# ------------------------------
+# Start real-time background watcher
+# ------------------------------
+def start_background_watcher():
     username = getpass.getuser()
     base = f"C:/Users/{username}"
 
-    folders = [
+    watch_dirs = [
         Path(base + "/Downloads"),
         Path(base + "/Desktop"),
         Path(base + "/Documents"),
-        Path(base + "/AppData/Local/Temp"),
+        Path(base + "/AppData/Local/Temp")
     ]
 
-    print("===== AUTO-SCAN MODE =====")
-    print("Scanning common locations (Downloads, Desktop, Documents, Temp)...")
+    observer = Observer()
+    handler = WatchDogHandler()
 
-    for folder in folders:
-        scan_folder(folder)
+    for folder in watch_dirs:
+        if folder.exists():
+            observer.schedule(handler, str(folder), recursive=True)
 
-    print("\n✅ Auto-scan complete!")
+    observer.start()
+
+    try:
+        while True:
+            time.sleep(1)
+    except:
+        observer.stop()
+
+    observer.join()
 
 
-# ============================================
-# Program Entry
-# ============================================
+# ------------------------------
+# Entry point
+# ------------------------------
 if __name__ == "__main__":
-    print("===== WatchDog Lite Scanner =====")
-    print("1. Auto-scan common folders")
-    print("2. Scan manually (enter folder path)")
-    print("3. Exit")
-
-    choice = input("\nSelect option: ")
-
-    if choice == "1":
-        auto_scan_common_locations()
-
-    elif choice == "2":
-        path = input("Enter folder path: ")
-        scan_folder(Path(path))
-
-    else:
-        print("Exiting...")
+    start_background_watcher()
